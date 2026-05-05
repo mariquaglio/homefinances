@@ -1,0 +1,20 @@
+[
+  {
+    "nome": "Escola",
+    "dia": 5,
+    "valor": 0,
+    "chat_id": 0
+  },
+  {
+    "nome": "Condomínio",
+    "dia": 10,
+    "valor": 0,
+    "chat_id": 0
+  },
+  {
+    "nome": "Internet",
+    "dia": 15,
+    "valor": 0,
+    "chat_id": 0
+  }
+]

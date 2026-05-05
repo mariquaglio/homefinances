@@ -1,0 +1,3 @@
+@echo off
+echo Corrigindo horario do computador...
+PowerShell -Command "Start-Process PowerShell -ArgumentList '-Command python \"%~dp0verificar_relogio.py\"' -Verb RunAs"
