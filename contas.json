@@ -1,20 +1,32 @@
 [
   {
     "nome": "Escola",
+    "dia": 1,
+    "valor": 3950.00,
+    "chat_id": -5061825275
+  },
+  {
+    "nome": "Mensalista",
+    "dia": 1,
+    "valor": 2839.41,
+    "chat_id": -5061825275
+  },
+  {
+    "nome": "Alimentação Escola",
     "dia": 5,
-    "valor": 0,
-    "chat_id": 0
+    "valor": 805.30,
+    "chat_id": -5061825275
   },
   {
     "nome": "Condomínio",
     "dia": 10,
-    "valor": 0,
-    "chat_id": 0
+    "valor": 2200.00,
+    "chat_id": -5061825275
   },
   {
-    "nome": "Internet",
-    "dia": 15,
-    "valor": 0,
-    "chat_id": 0
+    "nome": "Financiamento",
+    "dia": 19,
+    "valor": 7000.00,
+    "chat_id": -5061825275
   }
 ]

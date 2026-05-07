@@ -30,6 +30,11 @@ MARIANA_ID          = int(os.getenv('MARIANA_TELEGRAM_ID', '0'))
 MARIDO_ID           = int(os.getenv('MARIDO_TELEGRAM_ID', '0'))
 CREDENTIALS_FILE    = os.getenv('GOOGLE_CREDENTIALS_FILE', 'credentials.json')
 
+# Se estiver na nuvem, recria o credentials.json a partir da variável de ambiente
+_creds_json_str = os.getenv('GOOGLE_CREDENTIALS_JSON')
+if _creds_json_str and not Path(CREDENTIALS_FILE).exists():
+    Path(CREDENTIALS_FILE).write_text(_creds_json_str, encoding='utf-8')
+
 # ── Categorias ─────────────────────────────────────────────────────────────────
 CATEGORIAS = [
     'Mercado', 'Restaurante', 'Roupas', 'Natação', 'Escola',
@@ -67,6 +72,23 @@ PALAVRAS_CHAVE = {
     'Imóvel':            ['imóvel', 'imovel', 'aluguel', 'condomínio', 'condominio',
                           'iptu', 'financiamento', 'escritura', 'cartório'],
 }
+
+def fmt_saldo(valor: float) -> str:
+    """Formata saldo sem decimais, arredondando 0.5 pra cima. Ex: R$ 500 (+ Mari)"""
+    import math
+    arredondado = math.floor(abs(valor) + 0.5)
+    if valor > 0:
+        return f'R$ {arredondado} (+ Mari)'
+    elif valor < 0:
+        return f'R$ {arredondado} (- Guila)'
+    else:
+        return 'R$ 0 ✅ Quites!'
+
+
+def _pagou_marido(pagador: str) -> bool:
+    """Retorna True se o pagador for o marido (Guila/Guilherme/Marido)."""
+    return any(kw in pagador.lower() for kw in ['marido', 'guila', 'guilherme'])
+
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -186,7 +208,7 @@ def registrar_gasto(pagador: str, descricao: str, categoria: str, valor: float) 
             except ValueError:
                 pass
 
-    novo_saldo = saldo_atual + valor if 'marido' not in pagador.lower() else saldo_atual - valor
+    novo_saldo = saldo_atual - valor if _pagou_marido(pagador) else saldo_atual + valor
 
     data = datetime.now().strftime('%d/%m/%Y')
     ws.append_row([data, pagador, descricao, categoria, f'{novo_saldo:.2f}', f'{valor:.2f}'])
@@ -366,12 +388,7 @@ async def cmd_saldo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 except ValueError:
                     pass
 
-        if saldo > 0:
-            msg = f'💰 Saldo atual: *R${saldo:.2f}*\n📊 Você pagou mais este mês.'
-        elif saldo < 0:
-            msg = f'💰 Saldo atual: *R${abs(saldo):.2f}*\n📊 Seu marido pagou mais este mês.'
-        else:
-            msg = '💰 Saldo: *R$0,00* ✅ Vocês estão quites!'
+        msg = f'💰 Saldo: *{fmt_saldo(saldo)}*'
 
         await update.message.reply_text(msg, parse_mode='Markdown')
     except Exception as e:
@@ -441,10 +458,147 @@ async def cmd_ajuda(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         '*Comandos:*\n'
         '/saldo — saldo entre vocês\n'
         '/resumo — gastos por categoria\n'
+        '/deletar — deletar um lançamento\n'
+        '/corrigir — corrigir um lançamento\n'
+        '/ajustar 5393 — define saldo inicial\n'
+        '/dashboard — gráfico de gastos do mês\n'
         '/start — boas-vindas\n'
         '/ajuda — esta mensagem',
         parse_mode='Markdown',
     )
+
+
+def _ultimos_lancamentos(ws, n=5) -> list[dict]:
+    """Retorna os últimos n lançamentos da aba Saldo."""
+    rows = ws.get_all_values()
+    dados = [(i + 2, row) for i, row in enumerate(rows[1:]) if any(row)]
+    return [{'linha': r, 'data': row[0], 'pagador': row[1], 'desc': row[2],
+             'cat': row[3], 'saldo': row[4], 'valor': row[5]}
+            for r, row in dados[-n:]]
+
+
+async def cmd_ajustar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /ajustar 5393   → define saldo inicial como +R$5.393,00 (Mariana pagou mais)
+    /ajustar -2000  → define saldo inicial como -R$2.000,00 (Marido pagou mais)
+    """
+    args = context.args
+    if not args:
+        await update.message.reply_text(
+            '💡 *Como usar:*\n'
+            '`/ajustar 5393` → saldo inicial +R$5.393 (Mari pagou mais)\n'
+            '`/ajustar -2000` → saldo inicial -R$2.000 (Guila pagou mais)',
+            parse_mode='Markdown',
+        )
+        return
+
+    try:
+        valor_str = args[0].replace(',', '.').replace('R$', '').strip()
+        saldo_inicial = float(valor_str)
+    except ValueError:
+        await update.message.reply_text('❌ Valor inválido. Ex: `/ajustar 5393` ou `/ajustar -2000`',
+                                        parse_mode='Markdown')
+        return
+
+    try:
+        sheet = get_sheet()
+        ws = sheet.worksheet('Saldo')
+        data_hoje = datetime.now().strftime('%d/%m/%Y')
+
+        # Insere linha de saldo inicial logo após o cabeçalho (linha 2)
+        ws.insert_row(
+            [data_hoje, 'Saldo Inicial', 'Saldo Inicial', 'Ajuste',
+             f'{saldo_inicial:.2f}', f'{abs(saldo_inicial):.2f}'],
+            index=2
+        )
+
+        # Recalcula todos os saldos a partir do saldo inicial
+        rows = ws.get_all_values()
+        saldo = saldo_inicial
+        for i, row in enumerate(rows[2:], start=3):   # pula cabeçalho + linha inicial
+            if len(row) >= 6 and row[5]:
+                pagador_row = row[1]
+                if pagador_row == 'Saldo Inicial':
+                    continue
+                try:
+                    val = float(str(row[5]).replace(',', '.'))
+                    saldo = saldo + val if 'marido' not in pagador_row.lower() else saldo - val
+                    ws.update_cell(i, 5, f'{saldo:.2f}')
+                except Exception:
+                    pass
+
+        await update.message.reply_text(
+            f'✅ Saldo inicial definido!\n'
+            f'💰 *{fmt_saldo(saldo_inicial)}*\n\n'
+            f'Todos os lançamentos futuros serão calculados a partir deste valor.',
+            parse_mode='Markdown',
+        )
+    except Exception as e:
+        await update.message.reply_text(f'❌ Erro ao ajustar saldo: {e}')
+
+
+async def cmd_deletar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    try:
+        sheet = get_sheet()
+        ws = sheet.worksheet('Saldo')
+        ultimos = _ultimos_lancamentos(ws)
+
+        if not ultimos:
+            await update.message.reply_text('Nenhum lançamento encontrado.')
+            return
+
+        teclado = []
+        for l in reversed(ultimos):
+            data_curta = l['data'][:5]  # DD/MM
+            desc_curta = l['desc'][:18].strip()
+            pagador_curto = 'Mari' if 'mariana' in l['pagador'].lower() else 'Marido'
+            try:
+                valor_fmt = f"R${float(l['valor']):.0f}"
+            except Exception:
+                valor_fmt = f"R${l['valor']}"
+            label = f"❌ {data_curta} {pagador_curto} {desc_curta} {valor_fmt}"
+            teclado.append([InlineKeyboardButton(label, callback_data=f"del:{l['linha']}")])
+        teclado.append([InlineKeyboardButton('🚫 Cancelar', callback_data='del:cancel')])
+
+        await update.message.reply_text(
+            '🗑 *Qual lançamento deseja deletar?*',
+            reply_markup=InlineKeyboardMarkup(teclado),
+            parse_mode='Markdown',
+        )
+    except Exception as e:
+        await update.message.reply_text(f'❌ Erro: {e}')
+
+
+async def cmd_corrigir(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    try:
+        sheet = get_sheet()
+        ws = sheet.worksheet('Saldo')
+        ultimos = _ultimos_lancamentos(ws)
+
+        if not ultimos:
+            await update.message.reply_text('Nenhum lançamento encontrado.')
+            return
+
+        teclado = []
+        for l in reversed(ultimos):
+            data_curta = l['data'][:5]  # DD/MM
+            desc_curta = l['desc'][:18].strip()
+            pagador_curto = 'Mari' if 'mariana' in l['pagador'].lower() else 'Marido'
+            try:
+                valor_fmt = f"R${float(l['valor']):.0f}"
+            except Exception:
+                valor_fmt = f"R${l['valor']}"
+            label = f"✏️ {data_curta} {pagador_curto} {desc_curta} {valor_fmt}"
+            teclado.append([InlineKeyboardButton(label, callback_data=f"corr:{l['linha']}")])
+        teclado.append([InlineKeyboardButton('🚫 Cancelar', callback_data='corr:cancel')])
+
+        await update.message.reply_text(
+            '✏️ *Qual lançamento deseja corrigir?*',
+            reply_markup=InlineKeyboardMarkup(teclado),
+            parse_mode='Markdown',
+        )
+    except Exception as e:
+        await update.message.reply_text(f'❌ Erro: {e}')
 
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -462,12 +616,59 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     else:
         nome = update.message.from_user.first_name or 'Usuário'
 
+    # ── Modo correção: aguardando texto do usuário após /corrigir ──────────────
+    linha_corrigir = context.user_data.get('corrigir_linha')
+    if linha_corrigir:
+        gasto = parse_gasto(texto, nome)
+        if not gasto:
+            await update.message.reply_text(
+                '❌ Não entendi. Use o formato: `descrição valor`\n'
+                'Exemplo: `mercado 250`\n\n'
+                'Ou envie /corrigir para escolher de novo.',
+                parse_mode='Markdown',
+            )
+            return
+
+        categoria = gasto['categoria'] or gasto['sugestao']
+        try:
+            sheet = get_sheet()
+            ws = sheet.worksheet('Saldo')
+            data_hoje = datetime.now().strftime('%d/%m/%Y')
+            # Atualiza as colunas: Data, Pagador, Descrição, Categoria, (Saldo recalculado depois), Valor
+            ws.update(f'A{linha_corrigir}:D{linha_corrigir}',
+                      [[data_hoje, gasto['pagador'], gasto['descricao'], categoria]])
+            ws.update_cell(linha_corrigir, 6, f'{gasto["valor"]:.2f}')
+
+            # Recalcula saldos acumulados a partir da linha corrigida
+            rows = ws.get_all_values()
+            saldo = 0.0
+            for i, row in enumerate(rows[1:], start=2):
+                if len(row) >= 6 and row[5]:
+                    pagador_row = row[1]
+                    try:
+                        val = float(str(row[5]).replace(',', '.'))
+                        saldo = saldo - val if _pagou_marido(pagador_row) else saldo + val
+                        ws.update_cell(i, 5, f'{saldo:.2f}')
+                    except Exception:
+                        pass
+
+            context.user_data.pop('corrigir_linha', None)
+            await update.message.reply_text(
+                f'✅ Lançamento corrigido!\n'
+                f'👤 *{gasto["pagador"]}* pagou R${gasto["valor"]:.2f} em *{categoria}*\n'
+                f'📊 Saldo: {fmt_saldo(saldo)}',
+                parse_mode='Markdown',
+            )
+        except Exception as e:
+            await update.message.reply_text(f'❌ Erro ao corrigir: {e}')
+        return
+
     gasto = parse_gasto(texto, nome)
     if not gasto:
         return  # mensagem não é um gasto — ignorar
 
     if gasto['categoria']:
-        _confirmar_e_salvar(update, context, gasto)
+        await _confirmar_e_salvar(update, context, gasto)
         return
 
     # Categoria desconhecida → pede confirmação
@@ -517,23 +718,249 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         else:
             await query.edit_message_text('⏰ Ok! Vou lembrar novamente 1 dia antes do vencimento.')
 
+    elif data.startswith('del:'):
+        _, linha_str = data.split(':', 1)
+        if linha_str == 'cancel':
+            await query.edit_message_text('Cancelado.')
+            return
+        try:
+            sheet = get_sheet()
+            ws = sheet.worksheet('Saldo')
+            linha = int(linha_str)
+            ws.delete_rows(linha)
+            # Recalcula saldos acumulados
+            rows = ws.get_all_values()
+            saldo = 0.0
+            for i, row in enumerate(rows[1:], start=2):
+                if len(row) >= 6 and row[5]:
+                    pagador = row[1]
+                    try:
+                        valor = float(str(row[5]).replace(',', '.'))
+                        saldo = saldo - valor if _pagou_marido(pagador) else saldo + valor
+                        ws.update_cell(i, 5, f'{saldo:.2f}')
+                    except Exception:
+                        pass
+            await query.edit_message_text('🗑 Lançamento deletado e saldo recalculado!')
+        except Exception as e:
+            await query.edit_message_text(f'❌ Erro ao deletar: {e}')
 
-def _confirmar_e_salvar(update, context, gasto):
+    elif data.startswith('corr:'):
+        _, linha_str = data.split(':', 1)
+        if linha_str == 'cancel':
+            await query.edit_message_text('Cancelado.')
+            return
+        context.user_data['corrigir_linha'] = int(linha_str)
+        await query.edit_message_text(
+            '✏️ Digite a correção no formato:\n'
+            '`descrição valor`\n\n'
+            'Exemplo: `mercado 250`',
+            parse_mode='Markdown',
+        )
+
+
+def _gastos_por_mes(ws_s, ws_c, mes: int, ano: int) -> dict[str, float]:
+    """Soma gastos por categoria para um dado mês/ano (PIX + Cartão)."""
+    cats: dict[str, float] = {}
+    IGNORAR = {'Saldo Inicial', 'Ajuste', 'Cartão'}
+
+    for row in ws_s.get_all_values()[1:]:
+        if len(row) < 6 or not row[0] or row[1] == 'Saldo Inicial':
+            continue
+        try:
+            d = datetime.strptime(row[0], '%d/%m/%Y')
+            if d.month == mes and d.year == ano:
+                cat = row[3] or 'Outros'
+                if cat in IGNORAR:
+                    continue
+                val = float(str(row[5]).replace(',', '.').replace('R$', '').strip())
+                cats[cat] = cats.get(cat, 0) + val
+        except Exception:
+            pass
+
+    for row in ws_c.get_all_values()[1:]:
+        if len(row) < 4:
+            continue
+        try:
+            d = datetime.strptime(row[0], '%d/%m/%Y')
+            if d.month == mes and d.year == ano:
+                cat = row[2] or 'Outros'
+                val = float(str(row[3]).replace(',', '.'))
+                cats[cat] = cats.get(cat, 0) + val
+        except Exception:
+            pass
+
+    return cats
+
+
+def _gerar_insights(atual: dict, anterior: dict, media3: dict) -> str:
+    """Gera texto de insights comparando o mês atual com o anterior e média 3 meses."""
+    linhas = ['💡 *Insights do mês*\n']
+    total_atual   = sum(atual.values())
+    total_ant     = sum(anterior.values())
+    total_media3  = sum(media3.values())
+
+    # Comparação total
+    if total_ant > 0:
+        diff_ant = total_atual - total_ant
+        pct_ant  = diff_ant / total_ant * 100
+        sinal    = '▲' if diff_ant > 0 else '▼'
+        linhas.append(f'*vs mês anterior:* {sinal} R${abs(diff_ant):.0f} ({abs(pct_ant):.0f}%)')
+    if total_media3 > 0:
+        diff_m3 = total_atual - total_media3
+        pct_m3  = diff_m3 / total_media3 * 100
+        sinal   = '▲' if diff_m3 > 0 else '▼'
+        linhas.append(f'*vs média 3 meses:* {sinal} R${abs(diff_m3):.0f} ({abs(pct_m3):.0f}%)\n')
+
+    # Categorias que subiram (vs mês anterior)
+    subiram  = []
+    caíram   = []
+    todas_cats = set(atual) | set(anterior)
+    for cat in todas_cats:
+        v_atual = atual.get(cat, 0)
+        v_ant   = anterior.get(cat, 0)
+        if v_ant == 0 and v_atual > 0:
+            subiram.append((cat, v_atual, None))
+        elif v_ant > 0 and v_atual > v_ant * 1.15:   # subiu mais de 15%
+            subiram.append((cat, v_atual, (v_atual - v_ant) / v_ant * 100))
+        elif v_ant > 0 and v_atual < v_ant * 0.85:   # caiu mais de 15%
+            caíram.append((cat, v_atual, (v_ant - v_atual) / v_ant * 100))
+
+    subiram.sort(key=lambda x: x[1], reverse=True)
+    caíram.sort(key=lambda x: x[2], reverse=True)
+
+    if subiram:
+        linhas.append('⚠️ *Atenção — aumentou vs mês passado:*')
+        for cat, val, pct in subiram[:3]:
+            pct_str = f' (+{pct:.0f}%)' if pct else ' (novo)'
+            linhas.append(f'  • {cat}: R${val:.0f}{pct_str}')
+        linhas.append('')
+
+    if caíram:
+        linhas.append('✅ *Reduções — parabéns:*')
+        for cat, val, pct in caíram[:3]:
+            linhas.append(f'  • {cat}: R${val:.0f} (-{pct:.0f}%)')
+        linhas.append('')
+
+    # Top 3 categorias para cortar (maiores gastos vs média 3 meses)
+    oportunidades = []
+    for cat in atual:
+        v_atual = atual[cat]
+        v_media = media3.get(cat, 0)
+        if v_media > 0 and v_atual > v_media * 1.10:
+            oportunidades.append((cat, v_atual, v_atual - v_media))
+    oportunidades.sort(key=lambda x: x[2], reverse=True)
+
+    if oportunidades:
+        linhas.append('✂️ *Onde reduzir (acima da sua média):*')
+        for cat, val, exc in oportunidades[:3]:
+            linhas.append(f'  • {cat}: R${val:.0f} (R${exc:.0f} acima do normal)')
+
+    return '\n'.join(linhas)
+
+
+async def cmd_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Gera gráfico de gastos do mês por categoria (PIX + Cartão) + insights."""
+    try:
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        import io
+    except ImportError:
+        await update.message.reply_text('❌ Instale matplotlib: `pip install matplotlib`',
+                                        parse_mode='Markdown')
+        return
+
+    try:
+        sheet    = get_sheet()
+        ws_s     = sheet.worksheet('Saldo')
+        ws_c     = sheet.worksheet('Cartão')
+        hoje     = datetime.now()
+        mes, ano = hoje.month, hoje.year
+        nome_mes = hoje.strftime('%B/%Y').capitalize()
+
+        # ── Dados do mês atual e períodos anteriores ───────────────────────────
+        cats = _gastos_por_mes(ws_s, ws_c, mes, ano)
+
+        mes_ant = (hoje.replace(day=1) - timedelta(days=1))
+        anterior = _gastos_por_mes(ws_s, ws_c, mes_ant.month, mes_ant.year)
+
+        media3: dict[str, float] = {}
+        contagem3: dict[str, int] = {}
+        for delta in range(1, 4):
+            ref = hoje.replace(day=1) - timedelta(days=delta * 28)
+            dados = _gastos_por_mes(ws_s, ws_c, ref.month, ref.year)
+            for cat, val in dados.items():
+                media3[cat]    = media3.get(cat, 0) + val
+                contagem3[cat] = contagem3.get(cat, 0) + 1
+        for cat in media3:
+            media3[cat] /= contagem3[cat]
+
+        if not cats:
+            await update.message.reply_text(f'Nenhum gasto registrado em {nome_mes}.')
+            return
+
+        # ── Gráfico ────────────────────────────────────────────────────────────
+        cats_sorted = sorted(cats.items(), key=lambda x: x[1], reverse=True)
+        labels  = [c for c, _ in cats_sorted]
+        valores = [v for _, v in cats_sorted]
+        total   = sum(valores)
+
+        CORES = ['#4C72B0','#DD8452','#55A868','#C44E52','#8172B2',
+                 '#937860','#DA8BC3','#8C8C8C','#CCB974','#64B5CD',
+                 '#E377C2','#7F7F7F','#BCBD22','#17BECF']
+
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 6))
+        fig.patch.set_facecolor('#F8F9FA')
+
+        wedges, texts, autotexts = ax1.pie(
+            valores, labels=labels, autopct='%1.0f%%',
+            colors=CORES[:len(labels)], startangle=140,
+            pctdistance=0.82, textprops={'fontsize': 9}
+        )
+        for at in autotexts:
+            at.set_fontsize(8)
+        ax1.set_title(f'Gastos por Categoria\n{nome_mes}', fontsize=12, fontweight='bold', pad=15)
+
+        bars = ax2.barh(labels[::-1], valores[::-1], color=CORES[:len(labels)][::-1], height=0.6)
+        for bar, val in zip(bars, valores[::-1]):
+            ax2.text(bar.get_width() + total * 0.01, bar.get_y() + bar.get_height() / 2,
+                     f'R${val:.0f}', va='center', fontsize=9)
+        ax2.set_xlabel('R$', fontsize=10)
+        ax2.set_title(f'Valor por Categoria\nTotal: R${total:.0f}', fontsize=12, fontweight='bold')
+        ax2.set_facecolor('#F8F9FA')
+        ax2.spines['top'].set_visible(False)
+        ax2.spines['right'].set_visible(False)
+        ax2.set_xlim(0, max(valores) * 1.2)
+        plt.tight_layout(pad=2)
+
+        buf = io.BytesIO()
+        plt.savefig(buf, format='png', dpi=150, bbox_inches='tight')
+        buf.seek(0)
+        plt.close(fig)
+
+        caption = f'📊 *Dashboard {nome_mes}*\n💰 Total: R${total:.0f}'
+        await update.message.reply_photo(photo=buf, caption=caption, parse_mode='Markdown')
+
+        # ── Insights ───────────────────────────────────────────────────────────
+        insights = _gerar_insights(cats, anterior, media3)
+        await update.message.reply_text(insights, parse_mode='Markdown')
+
+    except Exception as e:
+        logger.error(f'Erro no dashboard: {e}')
+        await update.message.reply_text(f'❌ Erro ao gerar dashboard: {e}')
+
+
+async def _confirmar_e_salvar(update, context, gasto):
     """Salva gasto já categorizado e responde."""
-    import asyncio
-    async def _inner():
-        saldo = registrar_gasto(gasto['pagador'], gasto['descricao'], gasto['categoria'], gasto['valor'])
-        await update.message.reply_text(_msg_confirmacao(gasto, saldo), parse_mode='Markdown')
-    asyncio.ensure_future(_inner())
+    saldo = registrar_gasto(gasto['pagador'], gasto['descricao'], gasto['categoria'], gasto['valor'])
+    await update.message.reply_text(_msg_confirmacao(gasto, saldo), parse_mode='Markdown')
 
 
 def _msg_confirmacao(gasto: dict, saldo: float) -> str:
-    saldo_str = f'+R${saldo:.2f}' if saldo >= 0 else f'-R${abs(saldo):.2f}'
-    emoji = '✅'
     return (
-        f'{emoji} Registrado!\n'
+        f'✅ Registrado!\n'
         f'👤 *{gasto["pagador"]}* pagou R${gasto["valor"]:.2f} em *{gasto["categoria"]}*\n'
-        f'📊 Saldo: {saldo_str}'
+        f'📊 Saldo: {fmt_saldo(saldo)}'
     )
 
 
@@ -565,10 +992,17 @@ async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         for l in lancamentos:
             cats[l['categoria']] = cats.get(l['categoria'], 0) + l['valor']
 
-        linhas = [f'✅ *Fatura processada!* {len(lancamentos)} transações — Total: R${total:.2f}\n',
-                  '📊 Por categoria:']
+        # Lança o total da fatura no Saldo como pagamento do Guila
+        mes_ref = datetime.now().strftime('%m/%Y')
+        novo_saldo = registrar_gasto('Guila', f'Fatura Cartão {mes_ref}', 'Cartão', total)
+
+        linhas = [f'✅ *Fatura processada!* {len(lancamentos)} transações\n',
+                  f'💳 Total: *R${total:.2f}* (lançado como Guila pagou)',
+                  f'📊 Saldo atualizado: *{fmt_saldo(novo_saldo)}*\n',
+                  '📂 Por categoria:']
         for cat, val in sorted(cats.items(), key=lambda x: x[1], reverse=True):
             linhas.append(f'  • {cat}: R${val:.2f}')
+        linhas.append('\n_Use /dashboard para ver o gráfico do mês._')
 
         await update.message.reply_text('\n'.join(linhas), parse_mode='Markdown')
 
@@ -597,10 +1031,14 @@ def main() -> None:
 
     app = Application.builder().token(TOKEN).post_init(post_init).build()
 
-    app.add_handler(CommandHandler('start',  cmd_start))
-    app.add_handler(CommandHandler('saldo',  cmd_saldo))
-    app.add_handler(CommandHandler('resumo', cmd_resumo))
-    app.add_handler(CommandHandler('ajuda',  cmd_ajuda))
+    app.add_handler(CommandHandler('start',   cmd_start))
+    app.add_handler(CommandHandler('saldo',   cmd_saldo))
+    app.add_handler(CommandHandler('resumo',  cmd_resumo))
+    app.add_handler(CommandHandler('ajuda',   cmd_ajuda))
+    app.add_handler(CommandHandler('deletar',   cmd_deletar))
+    app.add_handler(CommandHandler('corrigir',  cmd_corrigir))
+    app.add_handler(CommandHandler('ajustar',   cmd_ajustar))
+    app.add_handler(CommandHandler('dashboard', cmd_dashboard))
     app.add_handler(MessageHandler(filters.Document.PDF, handle_pdf))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(CallbackQueryHandler(handle_callback))
