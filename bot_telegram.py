@@ -217,10 +217,14 @@ def registrar_gasto(pagador: str, descricao: str, categoria: str, valor: float) 
 
 
 def registrar_lancamentos_cartao(lancamentos: list[dict]) -> None:
+    if not lancamentos:
+        return
     sheet = get_sheet()
     ws = sheet.worksheet('Cartão')
-    for l in lancamentos:
-        ws.append_row([l['data'], l['estabelecimento'], l['categoria'], f"{l['valor']:.2f}"])
+    # Salva tudo de uma vez (1 chamada à API em vez de N)
+    linhas = [[l['data'], l['estabelecimento'], l['categoria'], f"{l['valor']:.2f}"]
+              for l in lancamentos]
+    ws.append_rows(linhas, value_input_option='USER_ENTERED')
 
 
 # ── PDF ────────────────────────────────────────────────────────────────────────
