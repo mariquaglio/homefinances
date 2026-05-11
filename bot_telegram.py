@@ -29,6 +29,7 @@ SPREADSHEET_ID      = os.getenv('SPREADSHEET_ID')
 MARIANA_ID          = int(os.getenv('MARIANA_TELEGRAM_ID', '0'))
 MARIDO_ID           = int(os.getenv('MARIDO_TELEGRAM_ID', '0'))
 CREDENTIALS_FILE    = os.getenv('GOOGLE_CREDENTIALS_FILE', 'credentials.json')
+PDF_PASSWORD        = os.getenv('PDF_PASSWORD', '')
 
 # Se estiver na nuvem, recria o credentials.json a partir da variável de ambiente
 _creds_json_str = os.getenv('GOOGLE_CREDENTIALS_JSON')
@@ -228,7 +229,8 @@ def processar_pdf(caminho_pdf: str) -> list[dict]:
     seen = set()
 
     try:
-        with pdfplumber.open(caminho_pdf) as pdf:
+        kwargs = {'password': PDF_PASSWORD} if PDF_PASSWORD else {}
+        with pdfplumber.open(caminho_pdf, **kwargs) as pdf:
             texto_completo = ''
             for page in pdf.pages:
                 tables = page.extract_tables()
