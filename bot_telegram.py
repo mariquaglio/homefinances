@@ -448,22 +448,34 @@ async def cmd_resumo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 async def cmd_ajuda(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        '📖 *Instruções completas*\n\n'
-        '*Registrar gasto (PIX / dinheiro):*\n'
-        '`mercado 200` → você pagou R$200\n'
-        '`marido gasolina 150` → marido pagou R$150\n'
-        '`restaurante 85,50 ele` → marido pagou R$85,50\n\n'
-        '*Fatura do cartão:*\n'
-        'Envie o arquivo PDF diretamente aqui.\n\n'
-        '*Comandos:*\n'
-        '/saldo — saldo entre vocês\n'
-        '/resumo — gastos por categoria\n'
-        '/deletar — deletar um lançamento\n'
-        '/corrigir — corrigir um lançamento\n'
-        '/ajustar 5393 — define saldo inicial\n'
-        '/dashboard — gráfico de gastos do mês\n'
+        '📖 *Guia de Comandos — Finanças da Casa*\n\n'
+
+        '💸 *Registrar gastos:*\n'
+        '`mercado 200` → Mari pagou R$200\n'
+        '`marido gasolina 150` → Guila pagou R$150\n'
+        '`restaurante 85,50 ele` → Guila pagou R$85,50\n'
+        '_Envie o PDF da fatura → cartão processado automaticamente_\n\n'
+
+        '💰 *Saldo:*\n'
+        '/saldo — saldo atual entre Mari e Guila\n'
+        '/ajustar 5393 — define saldo inicial (use número negativo para Guila)\n\n'
+
+        '📊 *Relatórios:*\n'
+        '/resumo — gastos por categoria este mês\n'
+        '/dashboard — gráfico do mês + insights\n'
+        '/grafico — fatura do cartão mês a mês 💳\n'
+        '/gastos — gasto total (PIX + cartão) mês a mês 📈\n\n'
+
+        '📅 *Contas fixas:*\n'
+        '/proxima — próximas contas a vencer\n\n'
+
+        '✏️ *Corrigir lançamentos:*\n'
+        '/deletar — apagar um lançamento\n'
+        '/corrigir — corrigir um lançamento\n\n'
+
+        '❓ *Outros:*\n'
         '/start — boas-vindas\n'
-        '/ajuda — esta mensagem',
+        '/ajuda — este menu',
         parse_mode='Markdown',
     )
 
@@ -744,6 +756,27 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         except Exception as e:
             await query.edit_message_text(f'❌ Erro ao deletar: {e}')
 
+    elif data.startswith('graf:') or data.startswith('gast:'):
+        tipo, ano_mes = data.split(':', 1)
+        if ano_mes == 'noop':
+            return
+        try:
+            ano, mes = map(int, ano_mes.split('-'))
+            sheet = get_sheet()
+            from telegram import InputMediaPhoto
+            if tipo == 'graf':
+                buf = await _gerar_buf_grafico(sheet, ano, mes)
+                caption = '💳 Fatura do cartão — navegue pelos meses'
+            else:
+                buf = await _gerar_buf_gastos(sheet, ano, mes)
+                caption = '📊 Gasto total (PIX + cartão) — navegue pelos meses'
+            await query.edit_message_media(
+                media=InputMediaPhoto(media=buf, caption=caption),
+                reply_markup=_teclado_grafico(ano, mes, tipo),
+            )
+        except Exception as e:
+            await query.answer(f'Erro: {e}', show_alert=True)
+
     elif data.startswith('corr:'):
         _, linha_str = data.split(':', 1)
         if linha_str == 'cancel':
@@ -950,6 +983,235 @@ async def cmd_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text(f'❌ Erro ao gerar dashboard: {e}')
 
 
+async def cmd_proxima(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Mostra as próximas contas a vencer."""
+    try:
+        import holidays as hol
+        br_holidays = hol.Brazil()
+    except ImportError:
+        br_holidays = {}
+
+    hoje = date.today()
+    contas = carregar_contas()
+    proximas = []
+
+    for conta in contas:
+        nome  = conta.get('nome', '')
+        dia   = conta.get('dia', 1)
+        valor = conta.get('valor', 0)
+
+        for delta_mes in range(2):  # este mês e o próximo
+            mes_ref = (hoje.month - 1 + delta_mes) % 12 + 1
+            ano_ref = hoje.year + ((hoje.month - 1 + delta_mes) // 12)
+            try:
+                venc = date(ano_ref, mes_ref, dia)
+            except ValueError:
+                continue
+
+            ajustado = venc
+            while ajustado.weekday() >= 5 or ajustado in br_holidays:
+                ajustado -= timedelta(days=1)
+
+            dias = (ajustado - hoje).days
+            if dias >= 0:
+                proximas.append((dias, nome, valor, ajustado))
+                break
+
+    if not proximas:
+        await update.message.reply_text('Nenhuma conta encontrada.')
+        return
+
+    proximas.sort(key=lambda x: x[0])
+    linhas = ['📅 *Próximas contas:*\n']
+    for dias, nome, valor, venc in proximas[:5]:
+        if dias == 0:
+            quando = '🔴 *HOJE*'
+        elif dias == 1:
+            quando = '🟠 *AMANHÃ*'
+        elif dias <= 5:
+            quando = f'🟡 em {dias} dias ({venc.strftime("%d/%m")})'
+        else:
+            quando = f'🟢 em {dias} dias ({venc.strftime("%d/%m")})'
+        linhas.append(f'{quando} — {nome}: R${valor:,.0f}'.replace(',', '.'))
+
+    await update.message.reply_text('\n'.join(linhas), parse_mode='Markdown')
+
+
+def _meses_range(ano: int, mes: int, antes=4, depois=2):
+    """Retorna lista de (ano, mes) centrada no mês dado."""
+    resultado = []
+    for delta in range(-antes, depois + 1):
+        m, a = mes + delta, ano
+        while m < 1:  m += 12; a -= 1
+        while m > 12: m -= 12; a += 1
+        resultado.append((a, m))
+    return resultado
+
+
+def _buf_barras(labels, valores, cores, titulo, cor_valor='white'):
+    """Gera PNG de barras horizontais simples."""
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    import io
+
+    fig, ax = plt.subplots(figsize=(13, 5))
+    fig.patch.set_facecolor('#1a1a2e')
+    ax.set_facecolor('#1a1a2e')
+
+    bars = ax.bar(range(len(labels)), valores, color=cores, alpha=0.9, width=0.6)
+    for bar, val in zip(bars, valores):
+        if val > 0:
+            ax.text(bar.get_x() + bar.get_width()/2, bar.get_height() + max(valores, default=1) * 0.01,
+                    f'R${val:,.0f}'.replace(',', '.'),
+                    ha='center', va='bottom', fontsize=8, color=cor_valor)
+
+    ax.set_xticks(range(len(labels)))
+    ax.set_xticklabels(labels, color='white', fontsize=8)
+    ax.yaxis.set_visible(False)
+    ax.spines[:].set_visible(False)
+    ax.set_title(titulo, color='white', fontsize=13, fontweight='bold', pad=12)
+    plt.tight_layout()
+
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', dpi=150, bbox_inches='tight', facecolor='#1a1a2e')
+    buf.seek(0)
+    plt.close(fig)
+    return buf
+
+
+async def _gerar_buf_grafico(sheet, ano: int, mes: int):
+    """Gráfico só de cartão de crédito, mês a mês."""
+    ws_c = sheet.worksheet('Cartão')
+
+    meses = _meses_range(ano, mes)
+    gastos = {}
+    for row in ws_c.get_all_values()[1:]:
+        if len(row) < 4:
+            continue
+        try:
+            d = datetime.strptime(row[0], '%d/%m/%Y')
+            val = float(str(row[3]).replace(',', '.'))
+            gastos[(d.year, d.month)] = gastos.get((d.year, d.month), 0) + val
+        except Exception:
+            pass
+
+    nomes = ['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez']
+    hoje  = date.today()
+    labels, valores, cores = [], [], []
+    for a, m in meses:
+        labels.append(f'{nomes[m-1]}\n{a}')
+        valores.append(gastos.get((a, m), 0))
+        if (a, m) == (ano, mes):
+            cores.append('#A78BFA')
+        elif (a, m) < (hoje.year, hoje.month):
+            cores.append('#64B5CD')
+        else:
+            cores.append('#444466')
+
+    return _buf_barras(labels, valores, cores, f'💳 Fatura do Cartão — {nomes[mes-1]}/{ano}')
+
+
+async def _gerar_buf_gastos(sheet, ano: int, mes: int):
+    """Gráfico de gasto global (PIX + cartão) mês a mês."""
+    ws_s = sheet.worksheet('Saldo')
+    ws_c = sheet.worksheet('Cartão')
+    IGNORAR = {'Saldo Inicial', 'Ajuste'}
+
+    meses = _meses_range(ano, mes)
+    gastos: dict = {}
+
+    # PIX (aba Saldo)
+    for row in ws_s.get_all_values()[1:]:
+        if len(row) < 6 or not row[0] or row[1] in IGNORAR or row[3] in IGNORAR:
+            continue
+        if row[3] == 'Cartão':   # evita dupla contagem
+            continue
+        try:
+            d = datetime.strptime(row[0], '%d/%m/%Y')
+            val = float(str(row[5]).replace(',', '.').replace('R$', '').strip())
+            gastos[(d.year, d.month)] = gastos.get((d.year, d.month), 0) + val
+        except Exception:
+            pass
+
+    # Cartão (aba Cartão)
+    for row in ws_c.get_all_values()[1:]:
+        if len(row) < 4:
+            continue
+        try:
+            d = datetime.strptime(row[0], '%d/%m/%Y')
+            val = float(str(row[3]).replace(',', '.'))
+            gastos[(d.year, d.month)] = gastos.get((d.year, d.month), 0) + val
+        except Exception:
+            pass
+
+    nomes = ['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez']
+    hoje  = date.today()
+    labels, valores, cores = [], [], []
+    for a, m in meses:
+        labels.append(f'{nomes[m-1]}\n{a}')
+        valores.append(gastos.get((a, m), 0))
+        if (a, m) == (ano, mes):
+            cores.append('#34D399')
+        elif (a, m) < (hoje.year, hoje.month):
+            cores.append('#6EE7B7')
+        else:
+            cores.append('#2D6A4F')
+
+    return _buf_barras(labels, valores, cores, f'📊 Gasto Total (PIX + Cartão) — {nomes[mes-1]}/{ano}', cor_valor='#D1FAE5')
+
+    plt.tight_layout()
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', dpi=150, bbox_inches='tight', facecolor='#1a1a2e')
+    buf.seek(0)
+    plt.close(fig)
+    return buf
+
+
+def _teclado_grafico(ano: int, mes: int, tipo: str = 'graf') -> InlineKeyboardMarkup:
+    """tipo: 'graf' (cartão) ou 'gast' (global)"""
+    ma = mes - 1 if mes > 1 else 12
+    aa = ano if mes > 1 else ano - 1
+    mp = mes + 1 if mes < 12 else 1
+    ap = ano if mes < 12 else ano + 1
+    nomes = ['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez']
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton(f'◀ {nomes[ma-1]}', callback_data=f'{tipo}:{aa}-{ma:02d}'),
+        InlineKeyboardButton(f'{nomes[mes-1]}/{ano}', callback_data=f'{tipo}:noop'),
+        InlineKeyboardButton(f'{nomes[mp-1]} ▶', callback_data=f'{tipo}:{ap}-{mp:02d}'),
+    ]])
+
+
+async def cmd_grafico(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Gráfico de fatura do cartão mês a mês."""
+    hoje = datetime.now()
+    try:
+        sheet = get_sheet()
+        buf = await _gerar_buf_grafico(sheet, hoje.year, hoje.month)
+        await update.message.reply_photo(
+            photo=buf,
+            caption='💳 Fatura do cartão — navegue pelos meses',
+            reply_markup=_teclado_grafico(hoje.year, hoje.month, 'graf'),
+        )
+    except Exception as e:
+        await update.message.reply_text(f'❌ Erro ao gerar gráfico: {e}')
+
+
+async def cmd_gastos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Gráfico de gasto total (PIX + cartão) mês a mês."""
+    hoje = datetime.now()
+    try:
+        sheet = get_sheet()
+        buf = await _gerar_buf_gastos(sheet, hoje.year, hoje.month)
+        await update.message.reply_photo(
+            photo=buf,
+            caption='📊 Gasto total (PIX + cartão) — navegue pelos meses',
+            reply_markup=_teclado_grafico(hoje.year, hoje.month, 'gast'),
+        )
+    except Exception as e:
+        await update.message.reply_text(f'❌ Erro ao gerar gráfico: {e}')
+
+
 async def _confirmar_e_salvar(update, context, gasto):
     """Salva gasto já categorizado e responde."""
     saldo = registrar_gasto(gasto['pagador'], gasto['descricao'], gasto['categoria'], gasto['valor'])
@@ -1039,6 +1301,9 @@ def main() -> None:
     app.add_handler(CommandHandler('corrigir',  cmd_corrigir))
     app.add_handler(CommandHandler('ajustar',   cmd_ajustar))
     app.add_handler(CommandHandler('dashboard', cmd_dashboard))
+    app.add_handler(CommandHandler('proxima',   cmd_proxima))
+    app.add_handler(CommandHandler('grafico',   cmd_grafico))
+    app.add_handler(CommandHandler('gastos',    cmd_gastos))
     app.add_handler(MessageHandler(filters.Document.PDF, handle_pdf))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(CallbackQueryHandler(handle_callback))
