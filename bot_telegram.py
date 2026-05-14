@@ -590,10 +590,22 @@ async def cmd_ajustar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     try:
-        valor_str = args[0].replace(',', '.').replace('R$', '').strip()
+        valor_str = args[0].replace('R$', '').strip()
+        # Suporta formato brasileiro: 11.872 ou 11.872,50 ou 11872
+        if ',' in valor_str:
+            # Ex: 11.872,50 → remove ponto de milhar, troca vírgula por ponto
+            valor_str = valor_str.replace('.', '').replace(',', '.')
+        else:
+            # Ex: 11.872 → ponto é milhar, remove
+            # Ex: 11872 → sem separador, ok
+            # Distingue milhar de decimal: se após o ponto tem 3 dígitos, é milhar
+            import re as _re
+            if _re.search(r'\.\d{3}$', valor_str):
+                valor_str = valor_str.replace('.', '')
+            # se após o ponto tem 1 ou 2 dígitos, é decimal (mantém)
         saldo_inicial = float(valor_str)
     except ValueError:
-        await update.message.reply_text('❌ Valor inválido. Ex: `/ajustar 5393` ou `/ajustar -2000`',
+        await update.message.reply_text('❌ Valor inválido. Ex: `/ajustar 5393` ou `/ajustar -11872`',
                                         parse_mode='Markdown')
         return
 
