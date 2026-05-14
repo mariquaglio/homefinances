@@ -285,10 +285,24 @@ def registrar_lancamentos_cartao(lancamentos: list[dict]) -> None:
         return
     sheet = get_sheet()
     ws = sheet.worksheet('Cartão')
-    # Salva tudo de uma vez (1 chamada à API em vez de N)
-    linhas = [[l['data'], l['estabelecimento'], l['categoria'], f"{l['valor']:.2f}"]
-              for l in lancamentos]
-    ws.append_rows(linhas, value_input_option='USER_ENTERED')
+
+    # Deduplica: ignora transações que já existem (mesma data+estabelecimento+valor)
+    existentes = set()
+    for row in ws.get_all_values()[1:]:
+        if len(row) >= 4 and any(row):
+            existentes.add((row[0].strip(), row[1].strip()[:30], row[3].strip()))
+
+    novas = []
+    for l in lancamentos:
+        chave = (l['data'].strip(), l['estabelecimento'].strip()[:30], f"{l['valor']:.2f}")
+        if chave not in existentes:
+            novas.append([l['data'], l['estabelecimento'], l['categoria'], f"{l['valor']:.2f}"])
+            existentes.add(chave)  # evita duplicar dentro do mesmo lote
+
+    if novas:
+        ws.append_rows(novas, value_input_option='USER_ENTERED')
+
+    return len(novas)
 
 
 # ── PDF ────────────────────────────────────────────────────────────────────────
@@ -1380,18 +1394,38 @@ async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             )
             return
 
-        registrar_lancamentos_cartao(lancamentos)
+        novas = registrar_lancamentos_cartao(lancamentos)
 
         total = sum(l['valor'] for l in lancamentos)
         cats: dict[str, float] = {}
         for l in lancamentos:
             cats[l['categoria']] = cats.get(l['categoria'], 0) + l['valor']
 
-        # Lança o total da fatura no Saldo como pagamento do Guila
+        # Lança o total da fatura no Saldo — apenas se ainda não foi lançado este mês
         mes_ref = datetime.now().strftime('%m/%Y')
-        novo_saldo = registrar_gasto('Guila', f'Fatura Cartão {mes_ref}', 'Cartão', total)
+        desc_fatura = f'Fatura Cartão {mes_ref}'
+        sheet_s = get_sheet()
+        ws_s = sheet_s.worksheet('Saldo')
+        ja_existe = any(
+            row[2].strip() == desc_fatura
+            for row in ws_s.get_all_values()[1:]
+            if len(row) >= 3
+        )
+        if not ja_existe:
+            novo_saldo = registrar_gasto('Guila', desc_fatura, 'Cartão', total)
+        else:
+            # Só busca saldo atual sem relançar
+            rows = ws_s.get_all_values()
+            novo_saldo = 0.0
+            for row in rows[1:]:
+                if len(row) >= 5 and row[4]:
+                    try:
+                        novo_saldo = float(str(row[4]).replace(',', '.').replace('R$', '').strip())
+                    except ValueError:
+                        pass
 
-        linhas = [f'✅ *Fatura processada!* {len(lancamentos)} transações\n',
+        aviso_dup = f' ({len(lancamentos) - novas} já existiam)' if novas < len(lancamentos) else ''
+        linhas = [f'✅ *Fatura processada!* {novas} transações novas{aviso_dup}\n',
                   f'💳 Total: *R${total:.2f}* (lançado como Guila pagou)',
                   f'📊 Saldo atualizado: *{fmt_saldo(novo_saldo)}*\n',
                   '📂 Por categoria:']
