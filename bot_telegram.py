@@ -528,6 +528,7 @@ async def cmd_ajuda(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
         '💰 *Saldo:*\n'
         '/saldo — saldo atual entre Mari e Guila\n'
+        '/acerto 5000 — registra transferência de acerto (não conta como gasto)\n'
         '/ajustar 5393 — define saldo inicial (use número negativo para Guila)\n\n'
 
         '📊 *Relatórios:*\n'
@@ -1053,6 +1054,68 @@ async def cmd_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text(f'❌ Erro ao gerar dashboard: {e}')
 
 
+async def cmd_acerto(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /acerto 5000 — registra um acerto de contas sem contar como gasto.
+    Ajusta o saldo na direção certa automaticamente.
+    """
+    args = context.args
+    if not args:
+        await update.message.reply_text(
+            '💸 *Como usar:*\n'
+            '`/acerto 5000` — registra transferência de acerto de R$5.000\n\n'
+            'O bot ajusta o saldo automaticamente sem contar como gasto.',
+            parse_mode='Markdown',
+        )
+        return
+
+    try:
+        valor = float(args[0].replace(',', '.').replace('R$', '').strip())
+        if valor <= 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text('❌ Valor inválido. Ex: `/acerto 5000`', parse_mode='Markdown')
+        return
+
+    try:
+        sheet = get_sheet()
+        ws = sheet.worksheet('Saldo')
+        rows = ws.get_all_values()
+
+        # Pega saldo atual
+        saldo_atual = 0.0
+        for row in rows[1:]:
+            if len(row) >= 5 and row[4]:
+                try:
+                    saldo_atual = float(str(row[4]).replace(',', '.').replace('R$', '').strip())
+                except ValueError:
+                    pass
+
+        # Direção: se saldo negativo, Mari acerta para Guila (aumenta saldo)
+        # Se saldo positivo, Guila acerta para Mari (diminui saldo)
+        if saldo_atual < 0:
+            quem_pagou = 'Mari'
+            novo_saldo = saldo_atual + valor
+            descricao = f'Acerto Mari → Guila'
+        else:
+            quem_pagou = 'Guila'
+            novo_saldo = saldo_atual - valor
+            descricao = f'Acerto Guila → Mari'
+
+        data = datetime.now().strftime('%d/%m/%Y')
+        ws.append_row([data, quem_pagou, descricao, 'Acerto', f'{novo_saldo:.2f}', f'{valor:.2f}'])
+
+        await update.message.reply_text(
+            f'✅ *Acerto registrado!*\n'
+            f'💸 Transferência de R${valor:.0f}\n'
+            f'📊 Saldo: *{fmt_saldo(novo_saldo)}*\n\n'
+            f'_Este valor não entra nos relatórios de gastos._',
+            parse_mode='Markdown',
+        )
+    except Exception as e:
+        await update.message.reply_text(f'❌ Erro ao registrar acerto: {e}')
+
+
 async def cmd_proxima(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Mostra as próximas contas a vencer."""
     try:
@@ -1371,6 +1434,7 @@ def main() -> None:
     app.add_handler(CommandHandler('corrigir',  cmd_corrigir))
     app.add_handler(CommandHandler('ajustar',   cmd_ajustar))
     app.add_handler(CommandHandler('dashboard', cmd_dashboard))
+    app.add_handler(CommandHandler('acerto',    cmd_acerto))
     app.add_handler(CommandHandler('proxima',   cmd_proxima))
     app.add_handler(CommandHandler('grafico',   cmd_grafico))
     app.add_handler(CommandHandler('gastos',    cmd_gastos))
