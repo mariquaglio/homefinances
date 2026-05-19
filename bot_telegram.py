@@ -201,7 +201,9 @@ def sugerir_categoria(descricao: str) -> str:
 
 
 # ── Parser de mensagem ─────────────────────────────────────────────────────────
-MARIDO_KEYWORDS = ['marido', 'dele', 'ele pagou', 'marido pagou']
+MARIDO_KEYWORDS = ['marido', 'dele', 'ele pagou', 'marido pagou',
+                   'gui pagou', 'guilherme pagou', 'dengo pagou',
+                   'gui', 'guila', 'guilherme', 'dengo']
 
 def parse_gasto(texto: str, nome_padrao: str) -> dict | None:
     """
