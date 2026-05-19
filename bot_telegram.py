@@ -63,7 +63,7 @@ PALAVRAS_CHAVE = {
                           'starbucks', 'frango assado', 'spoleto', 'china in box',
                           'coco bambu', 'almanara', 'bacio di latte', 'sorvete',
                           'acai', 'açaí', 'lanches', 'eats', 'grelhados', 'birosca'],
-    'Roupas':            ['roupa', 'zara', 'hm', 'h&m', 'renner', 'riachuelo', 'farm',
+    'Roupas':            ['roupa', 'zara', 'hm', 'h&m', 'renner', 'riachuelo', 'farm rio',
                           'arezzo', 'sapato', 'tenis', 'vestuário', 'c&a', 'cea',
                           'reserva', 'animale', 'shoulder', 'forum', 'mixed', 'nike',
                           'adidas', 'puma', 'oakley', 'vivara', 'pandora', 'le lis',
@@ -139,13 +139,14 @@ PALAVRAS_CHAVE = {
 }
 
 def fmt_saldo(valor: float) -> str:
-    """Formata saldo sem decimais, arredondando 0.5 pra cima. Ex: R$ 500 (+ Mari)"""
+    """Formata saldo sem centavos, preservando o valor inteiro. Ex: R$ 11.872 (- Guila)"""
     import math
-    arredondado = math.floor(abs(valor) + 0.5)
+    inteiro = math.floor(abs(valor) + 0.5)   # arredonda apenas os centavos
+    formatado = f'{inteiro:,}'.replace(',', '.')  # separador de milhar brasileiro
     if valor > 0:
-        return f'R$ {arredondado} (+ Mari)'
+        return f'R$ {formatado} (+ Mari)'
     elif valor < 0:
-        return f'R$ {arredondado} (- Guila)'
+        return f'R$ {formatado} (- Guila)'
     else:
         return 'R$ 0 ✅ Quites!'
 
@@ -614,32 +615,22 @@ async def cmd_ajustar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         ws = sheet.worksheet('Saldo')
         data_hoje = datetime.now().strftime('%d/%m/%Y')
 
-        # Insere linha de saldo inicial logo após o cabeçalho (linha 2)
-        ws.insert_row(
-            [data_hoje, 'Saldo Inicial', 'Saldo Inicial', 'Ajuste',
-             f'{saldo_inicial:.2f}', f'{abs(saldo_inicial):.2f}'],
-            index=2
-        )
-
-        # Recalcula todos os saldos a partir do saldo inicial
+        # Remove linhas "Saldo Inicial" / "Ajuste de Saldo" antigas
         rows = ws.get_all_values()
-        saldo = saldo_inicial
-        for i, row in enumerate(rows[2:], start=3):   # pula cabeçalho + linha inicial
-            if len(row) >= 6 and row[5]:
-                pagador_row = row[1]
-                if pagador_row == 'Saldo Inicial':
-                    continue
-                try:
-                    val = float(str(row[5]).replace(',', '.'))
-                    saldo = saldo + val if 'marido' not in pagador_row.lower() else saldo - val
-                    ws.update_cell(i, 5, f'{saldo:.2f}')
-                except Exception:
-                    pass
+        linhas_para_deletar = [i + 1 for i, row in enumerate(rows)
+                               if row and row[1] == 'Saldo Inicial']
+        for linha in sorted(linhas_para_deletar, reverse=True):
+            ws.delete_rows(linha)
+
+        # Adiciona linha de ajuste ao FINAL — sem recalcular linhas antigas
+        # Assim o próximo gasto sempre calcula a partir deste saldo
+        ws.append_row([data_hoje, 'Saldo Inicial', 'Ajuste de Saldo', 'Ajuste',
+                       f'{saldo_inicial:.2f}', '0'])
 
         await update.message.reply_text(
-            f'✅ Saldo inicial definido!\n'
+            f'✅ Saldo definido!\n'
             f'💰 *{fmt_saldo(saldo_inicial)}*\n\n'
-            f'Todos os lançamentos futuros serão calculados a partir deste valor.',
+            f'Os próximos lançamentos serão calculados a partir deste valor.',
             parse_mode='Markdown',
         )
     except Exception as e:
@@ -1096,11 +1087,20 @@ async def cmd_acerto(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
 
     try:
-        valor = float(args[0].replace(',', '.').replace('R$', '').strip())
+        valor_str = args[0].replace('R$', '').strip()
+        # Suporta formato brasileiro: 3.500 ou 3.500,00 ou 3500
+        if ',' in valor_str:
+            valor_str = valor_str.replace('.', '').replace(',', '.')
+        else:
+            import re as _re
+            if _re.search(r'\.\d{3}$', valor_str):
+                valor_str = valor_str.replace('.', '')
+        valor = float(valor_str)
         if valor <= 0:
             raise ValueError
     except ValueError:
-        await update.message.reply_text('❌ Valor inválido. Ex: `/acerto 5000`', parse_mode='Markdown')
+        await update.message.reply_text('❌ Valor inválido. Ex: `/acerto 3500` ou `/acerto 3.500`',
+                                        parse_mode='Markdown')
         return
 
     try:
@@ -1117,23 +1117,23 @@ async def cmd_acerto(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                 except ValueError:
                     pass
 
-        # Direção: se saldo negativo, Mari acerta para Guila (aumenta saldo)
-        # Se saldo positivo, Guila acerta para Mari (diminui saldo)
+        # Lógica: transferência de X quita 2X do saldo
+        # (remove X do lado de quem pagou mais + credita X para quem está devendo)
+        # saldo negativo = Guila pagou mais → Mari transfere para Guila
+        # saldo positivo = Mari pagou mais → Guila transfere para Mari
         if saldo_atual < 0:
-            quem_pagou = 'Mari'
-            novo_saldo = saldo_atual + valor
-            descricao = f'Acerto Mari → Guila'
+            descricao = 'Acerto Mari → Guila'
+            novo_saldo = saldo_atual + (2 * valor)
         else:
-            quem_pagou = 'Guila'
-            novo_saldo = saldo_atual - valor
-            descricao = f'Acerto Guila → Mari'
+            descricao = 'Acerto Guila → Mari'
+            novo_saldo = saldo_atual - (2 * valor)
 
         data = datetime.now().strftime('%d/%m/%Y')
-        ws.append_row([data, quem_pagou, descricao, 'Acerto', f'{novo_saldo:.2f}', f'{valor:.2f}'])
+        ws.append_row([data, 'Acerto', descricao, 'Acerto', f'{novo_saldo:.2f}', f'{valor:.2f}'])
 
         await update.message.reply_text(
             f'✅ *Acerto registrado!*\n'
-            f'💸 Transferência de R${valor:.0f}\n'
+            f'💸 Transferência de {fmt_saldo(valor)}\n'
             f'📊 Saldo: *{fmt_saldo(novo_saldo)}*\n\n'
             f'_Este valor não entra nos relatórios de gastos._',
             parse_mode='Markdown',
