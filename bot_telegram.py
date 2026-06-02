@@ -205,6 +205,9 @@ MARIDO_KEYWORDS = ['marido', 'dele', 'ele pagou', 'marido pagou',
                    'gui pagou', 'guilherme pagou', 'dengo pagou',
                    'gui', 'guila', 'guilherme', 'dengo']
 
+MARIANA_KEYWORDS = ['mari pagou', 'mariana pagou', 'eu pagei', 'eu paguei',
+                    'mari', 'mariana']
+
 def parse_gasto(texto: str, nome_padrao: str) -> dict | None:
     """
     Interpreta mensagens como:
@@ -216,8 +219,8 @@ def parse_gasto(texto: str, nome_padrao: str) -> dict | None:
     texto = texto.strip()
     pagador = nome_padrao
 
-    # Verifica se é gasto do marido
-    for kw in MARIDO_KEYWORDS:
+    # Verifica se é gasto do marido (keywords ordenadas por tamanho — mais longa primeiro)
+    for kw in sorted(MARIDO_KEYWORDS, key=len, reverse=True):
         pattern = rf'^{re.escape(kw)}\s*[:\-]?\s*'
         if re.match(pattern, texto, re.IGNORECASE):
             pagador = 'Marido'
@@ -227,6 +230,15 @@ def parse_gasto(texto: str, nome_padrao: str) -> dict | None:
     if re.search(r'\bele\b$', texto, re.IGNORECASE):
         pagador = 'Marido'
         texto = re.sub(r'\bele\b$', '', texto, flags=re.IGNORECASE).strip()
+
+    # Remove prefixo de Mariana da descrição (mari plano de saude → plano de saude)
+    if pagador != 'Marido':
+        for kw in sorted(MARIANA_KEYWORDS, key=len, reverse=True):
+            pattern = rf'^{re.escape(kw)}\s*[:\-]?\s*'
+            if re.match(pattern, texto, re.IGNORECASE):
+                pagador = 'Mariana'
+                texto = re.sub(pattern, '', texto, flags=re.IGNORECASE).strip()
+                break
 
     # Extrai valor numérico (ex: 200, 200.00, 200,00, R$200)
     texto = re.sub(r'\bR\$\s*', '', texto)
@@ -406,18 +418,31 @@ async def verificar_lembretes(app: Application) -> None:
         except ValueError:
             continue
 
+        # Se o vencimento já passou neste mês, olha para o próximo mês
+        if vencimento < hoje:
+            if hoje.month == 12:
+                try:
+                    vencimento = date(hoje.year + 1, 1, dia)
+                except ValueError:
+                    continue
+            else:
+                try:
+                    vencimento = date(hoje.year, hoje.month + 1, dia)
+                except ValueError:
+                    continue
+
         # Ajusta para dia útil anterior (fim de semana / feriado)
         ajustado = vencimento
         while ajustado.weekday() >= 5 or ajustado in br_holidays:
             ajustado -= timedelta(days=1)
 
-        conta_id = f'{nome}_{hoje.month}_{hoje.year}'
+        conta_id = f'{nome}_{vencimento.month}_{vencimento.year}'
         dias_para_vencer = (ajustado - hoje).days
 
         if conta_id in app.bot_data['contas_pagas']:
             continue
 
-        if dias_para_vencer not in (3, 1):
+        if dias_para_vencer not in (3, 1, 0):
             continue
 
         keyboard = [[
@@ -428,8 +453,11 @@ async def verificar_lembretes(app: Application) -> None:
         if dias_para_vencer == 3:
             texto = (f'🔔 Lembrete: *{nome}*{valor_str} vence em 3 dias '
                      f'({ajustado.strftime("%d/%m")}).')
-        else:
+        elif dias_para_vencer == 1:
             texto = (f'⚠️ ATENÇÃO: *{nome}*{valor_str} vence *AMANHÃ* '
+                     f'({ajustado.strftime("%d/%m")})!')
+        else:
+            texto = (f'🚨 HOJE: *{nome}*{valor_str} vence *HOJE* '
                      f'({ajustado.strftime("%d/%m")})!')
 
         await app.bot.send_message(
