@@ -325,11 +325,56 @@ def processar_pdf(caminho_pdf: str) -> list[dict]:
     lancamentos = []
     seen = set()
 
+    # Descrições a ignorar (pagamentos, IOF, créditos, cabeçalhos)
+    SKIP_DESCS = [
+        'pagamentos validos', 'iof transacoes', 'retirada de fundos',
+        'saldo financiado', 'saldo credor', 'credito visa', 'subtotal',
+        'data descricao', 'data descrição',
+    ]
+
+    # Número no formato brasileiro: 1.234,56 ou 234,56 ou -1.234,56
+    NUM_PAT = re.compile(r'^-?[\d.]+,\d{2}$')
+
+    def parse_linha_xp(linha: str):
+        """Extrai (data, desc, valor_brl) de uma linha no formato XP: DD/MM/YY DESC BRL [USD]"""
+        m = re.match(r'^(\d{2}/\d{2}/\d{2})\s+(.+)$', linha.strip())
+        if not m:
+            return None
+        data_raw, resto = m.group(1), m.group(2)
+        tokens = resto.split()
+        values, desc_tokens = [], []
+        for tok in reversed(tokens):
+            if not desc_tokens and NUM_PAT.match(tok):
+                values.insert(0, tok)
+            else:
+                desc_tokens.insert(0, tok)
+        if not values:
+            return None
+        brl_str = values[0]   # primeiro número = BRL (USD fica em values[1] se existir)
+        desc = ' '.join(desc_tokens).strip()
+        return data_raw, desc, brl_str
+
+    def brl_to_float(s: str) -> float:
+        return float(s.replace('.', '').replace(',', '.'))
+
+    def formatar_data(data_raw: str) -> str:
+        """DD/MM/YY → DD/MM/YYYY"""
+        partes = data_raw.split('/')
+        if len(partes) == 3 and len(partes[2]) == 2:
+            return f'{partes[0]}/{partes[1]}/20{partes[2]}'
+        return f'{data_raw}/{datetime.now().year}'
+
+    def limpar_desc(desc: str) -> str:
+        desc = re.sub(r'\s*-?\s*Parcela\s+\d+/\d+', '', desc, flags=re.IGNORECASE)
+        desc = re.sub(r'\s*R\$\s*', '', desc)
+        return re.sub(r'\s+', ' ', desc).strip()
+
     try:
         kwargs = {'password': PDF_PASSWORD} if PDF_PASSWORD else {}
         with pdfplumber.open(caminho_pdf, **kwargs) as pdf:
             texto_completo = ''
             for page in pdf.pages:
+                # 1) Tenta extração via tabelas (formato Nubank, Itaú, etc.)
                 tables = page.extract_tables()
                 for table in tables:
                     for row in table:
@@ -355,9 +400,44 @@ def processar_pdf(caminho_pdf: str) -> list[dict]:
                                         })
                                 except Exception:
                                     continue
-                texto_completo += page.extract_text() or ''
+                texto_completo += (page.extract_text() or '') + '\n'
 
-            # Fallback: regex no texto
+            # 2) Fallback texto: formato XP (DD/MM/YY DESC BRL [USD])
+            if not lancamentos and texto_completo:
+                for linha in texto_completo.splitlines():
+                    resultado = parse_linha_xp(linha)
+                    if not resultado:
+                        continue
+                    data_raw, desc, brl_str = resultado
+                    desc_clean = limpar_desc(desc)
+
+                    # Pula linhas de sistema
+                    if any(skip in desc_clean.lower() for skip in SKIP_DESCS):
+                        continue
+                    if any(skip in desc.lower() for skip in SKIP_DESCS):
+                        continue
+
+                    try:
+                        valor = brl_to_float(brl_str)
+                    except ValueError:
+                        continue
+
+                    # Pula valores negativos (estornos/pagamentos)
+                    if valor <= 0:
+                        continue
+
+                    data_fmt = formatar_data(data_raw)
+                    key = f'{data_fmt}_{desc_clean}_{valor}'
+                    if key not in seen:
+                        seen.add(key)
+                        lancamentos.append({
+                            'data': data_fmt,
+                            'estabelecimento': desc_clean,
+                            'categoria': sugerir_categoria(desc_clean),
+                            'valor': valor,
+                        })
+
+            # 3) Último recurso: regex genérico DD/MM
             if not lancamentos and texto_completo:
                 for data, desc, val in re.findall(
                     r'(\d{2}/\d{2})\s+(.+?)\s+([\d]{1,6}[.,]\d{2})', texto_completo
@@ -369,14 +449,16 @@ def processar_pdf(caminho_pdf: str) -> list[dict]:
                         seen.add(key)
                         try:
                             valor = float(val_str)
-                            lancamentos.append({
-                                'data': f'{data}/{datetime.now().year}',
-                                'estabelecimento': desc,
-                                'categoria': sugerir_categoria(desc),
-                                'valor': valor,
-                            })
+                            if valor > 0:
+                                lancamentos.append({
+                                    'data': f'{data}/{datetime.now().year}',
+                                    'estabelecimento': desc,
+                                    'categoria': sugerir_categoria(desc),
+                                    'valor': valor,
+                                })
                         except ValueError:
                             continue
+
     except Exception as e:
         logger.error(f'Erro ao processar PDF: {e}')
 
