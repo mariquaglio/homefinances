@@ -1436,6 +1436,16 @@ async def handle_pdf(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             )
             return
 
+        # Rejeita PDFs com poucas transações — provavelmente comprovante de pagamento, não fatura
+        if len(lancamentos) < 3:
+            await update.message.reply_text(
+                '⚠️ Este PDF parece ser um *comprovante de pagamento*, não uma fatura de cartão.\n\n'
+                'Para registrar o pagamento, envie uma mensagem de texto:\n'
+                '`Condominio 2326` ou `gui condominio 2326`',
+                parse_mode='Markdown'
+            )
+            return
+
         novas = registrar_lancamentos_cartao(lancamentos)
 
         total = sum(l['valor'] for l in lancamentos)
